@@ -1,15 +1,14 @@
 # Deploy CoinSwift
 
-CoinSwift is a static paper-trading demo. It requires no database, backend, API key, or environment variable.
+CoinSwift is a static paper-trading demo. It requires no database, backend, API key, or environment variable. The production build bundles the app's JavaScript and CSS into one self-contained `dist/index.html`.
 
 ## Vercel
 
 1. Import the GitHub repository into Vercel.
-2. Select the Vite framework preset, or keep the detected defaults.
-3. Use `npm run build` as the build command and `dist` as the output directory.
-4. Deploy. No environment variables or external services are required.
+2. Keep the Vite framework preset, build command `npm run build`, and output directory `dist`.
+3. Deploy. No environment variables or external services are required.
 
-You can also deploy the generated `dist/` folder to any static web host.
+The only file in the generated output is `dist/index.html`; it can also be deployed directly to any static host.
 
 ## Limitations
 
