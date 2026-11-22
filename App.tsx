@@ -469,9 +469,9 @@ function Trade() {
                 <p>{recommendation.rationale}</p>
               </div>
               <div className="risk-notice"><ShieldCheck size={16} /><p>Indicative analysis only. Crypto prices are volatile and this is not financial advice.</p></div>
-              {recommendation.action !== 'WAIT' && (
-                <button className="place-order" onClick={() => setSide(recommendation.action === 'BUY' ? 'buy' : 'sell')}>
-                  Open {recommendation.action === 'BUY' ? 'buy' : 'sell'} ticket
+              {recommendation.action === 'BUY' && (
+                <button className="place-order" onClick={() => setSide('buy')}>
+                  Open buy ticket
                 </button>
               )}
             </div>
