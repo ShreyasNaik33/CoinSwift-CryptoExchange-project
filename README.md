@@ -1,6 +1,6 @@
 # CoinSwift
 
-CoinSwift is a crypto **paper-trading demo** with a React/Vite frontend and a PostgreSQL-backed API for user accounts, simulated wallet balances, holdings, and trade history. It does not process real money or connect to a real exchange. Market prices and AI-style signals are illustrative.
+CoinSwift is a static crypto **paper-trading demo** built with React and Vite. It has no backend, database, API keys, or environment variables to configure. Accounts and simulated portfolios are stored in the user's browser only.
 
 ## Local frontend
 
@@ -9,10 +9,10 @@ npm install
 npm run dev
 ```
 
-`npm run dev` starts the Vite frontend. To exercise serverless API functions locally, install the Vercel CLI and run `vercel dev` after setting the environment variables described in [DEPLOYMENT.md](./DEPLOYMENT.md).
+`npm run dev` starts the website locally.
 
 ## Deploy
 
-Deploy the repository through Vercel and configure `DATABASE_URL` and `SESSION_SECRET` in the project environment. Vercel builds the frontend with `npm run build`; API routes are in `api/`. Read [DEPLOYMENT.md](./DEPLOYMENT.md) for database setup and security notes.
+Import the repository into Vercel and deploy with the defaults: build command `npm run build`, output directory `dist`. No additional services or environment variables are required. See [DEPLOYMENT.md](./DEPLOYMENT.md).
 
-Never commit production credentials. `.env.example` contains placeholders only.
+This project is for demonstrations only. Browser-stored accounts are not server-secure or synced across devices; prices and trades are simulated and no real money is involved.

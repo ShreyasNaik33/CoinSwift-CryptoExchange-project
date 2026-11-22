@@ -22,38 +22,71 @@ import { MARKET_ASSETS, type MarketAsset } from './shared/market';
 
 type Coin = MarketAsset;
 type User = { id: string; name: string; email: string };
-type PortfolioData = {
-  user: User;
-  cashUsd: number;
-  totalUsd: number;
-  holdings: Array<Coin & { quantity: number; value: number }>;
-  orders: Array<{ id: string; side: 'BUY' | 'SELL'; assetId: string; symbol: string; quantity: number; unitPrice: number; totalUsd: number; createdAt: string }>;
+type StoredAccount = User & { salt: string; passwordHash: string };
+type PaperOrder = {
+  id: string;
+  side: 'BUY' | 'SELL';
+  assetId: string;
+  symbol: string;
+  quantity: number;
+  amountUsd: number;
+  createdAt: string;
+};
+type PaperPortfolio = {
+  cashCents: number;
+  holdings: Record<string, number>;
+  orders: PaperOrder[];
 };
 const coins = MARKET_ASSETS;
 
-class ApiError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message);
-    this.name = 'ApiError';
+function readStored<T>(key: string, fallback: T): T {
+  const value = localStorage.getItem(key);
+  if (value === null) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    throw new Error(`Saved demo data for "${key}" is invalid. Clear this site's browser data and try again.`);
   }
 }
 
-async function apiRequest<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  const response = await fetch(url, {
-    ...options,
-    credentials: 'same-origin',
-    headers,
-  });
-  let payload: { error?: string } & Record<string, unknown> = {};
+function writeStored(key: string, value: unknown): void {
   try {
-    payload = await response.json();
+    localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    if (response.ok) throw new Error('The server returned an invalid response.');
+    throw new Error('Browser storage is unavailable or full. Enable local storage and try again.');
   }
-  if (!response.ok) throw new ApiError(payload.error || 'The request could not be completed.', response.status);
-  return payload as T;
+}
+
+function portfolioKey(userId: string): string {
+  return `coinswift_paper_portfolio_${userId}`;
+}
+
+function readPaperPortfolio(userId: string): PaperPortfolio {
+  return readStored<PaperPortfolio>(portfolioKey(userId), {
+    cashCents: 1_000_000,
+    holdings: {},
+    orders: [],
+  });
+}
+
+function newSalt(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashPassword(password: string, salt: string): Promise<string> {
+  if (!crypto.subtle) throw new Error('Secure browser cryptography is unavailable. Open this site over HTTPS.');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const derived = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: new TextEncoder().encode(salt), iterations: 150_000, hash: 'SHA-256' },
+    key,
+    256,
+  );
+  return Array.from(new Uint8Array(derived), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function saveLocalSession(user: User): void {
+  writeStored('coinswift_local_session', user);
 }
 
 type AuthContextValue = {
@@ -74,18 +107,18 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let active = true;
-    apiRequest<{ user: User }>('/api/auth/me')
-      .then(({ user: currentUser }) => { if (active) setUser(currentUser); })
-      .catch((error: unknown) => {
-        if (!active) return;
-        if (!(error instanceof ApiError && error.status === 401)) {
-          console.error('Unable to restore CoinSwift session', error);
-        }
-        setUser(null);
-      })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
+    try {
+      localStorage.removeItem('coinswift_account');
+      localStorage.removeItem('coinswift_logged_in');
+      const saved = readStored<User | null>('coinswift_local_session', null);
+      if (saved && typeof saved.id === 'string' && typeof saved.name === 'string' && typeof saved.email === 'string') {
+        setUser(saved);
+      }
+    } catch (error) {
+      console.error('Unable to restore local paper-trading session', error);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   return <AuthContext.Provider value={{ user, loading, setUser }}>{children}</AuthContext.Provider>;
@@ -105,7 +138,7 @@ function Header() {
   const logout = async () => {
     setLogoutError('');
     try {
-      await apiRequest<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
+      localStorage.removeItem('coinswift_local_session');
       setUser(null);
       navigate('/');
     } catch (error) {
@@ -311,16 +344,35 @@ function Trade() {
     setSubmitting(true);
     setOrderMessage('');
     try {
-      await apiRequest('/api/trades', {
-        method: 'POST',
-        body: JSON.stringify({ assetId: coin.id, side: side.toUpperCase(), amountUsd: usdAmount }),
+      const totalCents = Math.round(usdAmount * 100);
+      if (totalCents < 100 || totalCents > 100_000_000) {
+        throw new Error('Trade amount must be between $1 and $1,000,000.');
+      }
+      const portfolio = readPaperPortfolio(user.id);
+      const quantity = Number((totalCents / 100 / coin.price).toFixed(12));
+      const currentQuantity = Number(portfolio.holdings[coin.id] || 0);
+      if (side === 'buy') {
+        if (totalCents > portfolio.cashCents) throw new Error('Insufficient paper cash balance.');
+        portfolio.cashCents -= totalCents;
+        portfolio.holdings[coin.id] = currentQuantity + quantity;
+      } else {
+        if (quantity > currentQuantity) throw new Error(`Insufficient ${coin.symbol} balance.`);
+        portfolio.holdings[coin.id] = currentQuantity - quantity;
+        portfolio.cashCents += totalCents;
+      }
+      portfolio.orders.unshift({
+        id: crypto.randomUUID(),
+        side: side.toUpperCase() as 'BUY' | 'SELL',
+        assetId: coin.id,
+        symbol: coin.symbol,
+        quantity,
+        amountUsd: totalCents / 100,
+        createdAt: new Date().toISOString(),
       });
+      portfolio.orders = portfolio.orders.slice(0, 50);
+      writeStored(portfolioKey(user.id), portfolio);
       setOrderMessage(`${side === 'buy' ? 'Buy' : 'Sell'} order completed successfully.`);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        navigate('/login');
-        return;
-      }
       setOrderMessage(error instanceof Error ? error.message : 'Unable to place this paper trade.');
     } finally {
       setSubmitting(false);
@@ -436,8 +488,7 @@ function Portfolio() {
   const [visible, setVisible] = useState(true);
   const [actionMessage, setActionMessage] = useState('');
   const [error, setError] = useState('');
-  const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [portfolio, setPortfolio] = useState<PaperPortfolio | null>(null);
 
   useEffect(() => {
     if (!authLoading && !user) navigate('/login', { replace: true });
@@ -445,71 +496,65 @@ function Portfolio() {
 
   useEffect(() => {
     if (!user) return;
-    let active = true;
-    setError('');
-    apiRequest<PortfolioData>('/api/portfolio')
-      .then((data) => { if (active) setPortfolio(data); })
-      .catch((requestError: unknown) => {
-        if (!active) return;
-        if (requestError instanceof ApiError && requestError.status === 401) {
-          navigate('/login', { replace: true });
-          return;
-        }
-        setError(requestError instanceof Error ? requestError.message : 'Unable to load your portfolio.');
-      });
-    return () => { active = false; };
-  }, [navigate, user]);
+    try {
+      setPortfolio(readPaperPortfolio(user.id));
+      setError('');
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load your local paper portfolio.');
+    }
+  }, [user]);
 
-  const updateCash = async (action: 'DEPOSIT' | 'WITHDRAW', amountUsd: number) => {
-    setBusy(true);
+  const updateCash = (action: 'DEPOSIT' | 'WITHDRAW', amountUsd: number) => {
+    if (!user || !portfolio) return;
     setError('');
     setActionMessage('');
+    const updated = { ...portfolio, holdings: { ...portfolio.holdings }, orders: [...portfolio.orders] };
+    const amountCents = Math.round(amountUsd * 100);
+    if (action === 'WITHDRAW' && amountCents > updated.cashCents) {
+      setError('Insufficient paper cash balance.');
+      return;
+    }
+    updated.cashCents += action === 'DEPOSIT' ? amountCents : -amountCents;
     try {
-      const result = await apiRequest<{ cashUsd: number }>('/api/wallet', {
-        method: 'POST',
-        body: JSON.stringify({ action, amountUsd }),
-      });
-      setPortfolio((current) => current ? {
-        ...current,
-        cashUsd: result.cashUsd,
-        totalUsd: current.totalUsd + (action === 'DEPOSIT' ? amountUsd : -amountUsd),
-      } : current);
+      writeStored(portfolioKey(user.id), updated);
+      setPortfolio(updated);
       setActionMessage(action === 'DEPOSIT' ? `${money(amountUsd)} paper cash added.` : `${money(amountUsd)} paper cash withdrawn.`);
-    } catch (requestError) {
-      if (requestError instanceof ApiError && requestError.status === 401) {
-        navigate('/login', { replace: true });
-      } else {
-        setError(requestError instanceof Error ? requestError.message : 'Unable to update your paper wallet.');
-      }
-    } finally {
-      setBusy(false);
+    } catch (writeError) {
+      setError(writeError instanceof Error ? writeError.message : 'Unable to update your local paper wallet.');
     }
   };
 
-  if (authLoading || !user) return <main className="page"><div className="loading-message">Loading your secure account...</div></main>;
+  if (authLoading || !user) return <main className="page"><div className="loading-message">Loading your local demo account...</div></main>;
   if (error && !portfolio) return <main className="page"><div className="auth-message auth-error" role="alert">{error}</div></main>;
   if (!portfolio) return <main className="page"><div className="loading-message">Loading portfolio...</div></main>;
 
+  const cashUsd = portfolio.cashCents / 100;
+  const holdings = coins.flatMap((coin) => {
+    const quantity = Number(portfolio.holdings[coin.id] || 0);
+    return quantity > 0 ? [{ ...coin, quantity, value: quantity * coin.price }] : [];
+  });
+  const totalUsd = holdings.reduce((sum, holding) => sum + holding.value, cashUsd);
+
   return (
     <main className="page">
-      <div className="page-heading"><div><span className="section-kicker">PAPER TRADING PORTFOLIO</span><h1>Welcome, {user.name.split(' ')[0]}</h1></div><button className="primary-small" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={16} /> : <Eye size={16} />} {visible ? 'Hide balance' : 'Show balance'}</button></div>
+      <div className="page-heading"><div><span className="section-kicker">LOCAL PAPER-TRADING PORTFOLIO</span><h1>Welcome, {user.name.split(' ')[0]}</h1></div><button className="primary-small" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={16} /> : <Eye size={16} />} {visible ? 'Hide balance' : 'Show balance'}</button></div>
       <div className="portfolio-summary">
-        <div><span>Total paper balance</span><strong>{visible ? money(portfolio.totalUsd) : '••••••••'}</strong><small>Available paper cash: {visible ? money(portfolio.cashUsd) : '••••'}</small></div>
-        <div className="portfolio-actions"><button disabled={busy} onClick={() => updateCash('DEPOSIT', 1000)}><ArrowDownLeft size={18} />Add $1,000 demo cash</button><button disabled={busy} onClick={() => updateCash('WITHDRAW', 250)}><ArrowUpRight size={18} />Withdraw $250</button></div>
+        <div><span>Total paper balance</span><strong>{visible ? money(totalUsd) : '••••••••'}</strong><small>Available paper cash: {visible ? money(cashUsd) : '••••'}</small></div>
+        <div className="portfolio-actions"><button onClick={() => updateCash('DEPOSIT', 1000)}><ArrowDownLeft size={18} />Add $1,000 demo cash</button><button onClick={() => updateCash('WITHDRAW', 250)}><ArrowUpRight size={18} />Withdraw $250</button></div>
       </div>
       {error && <div className="portfolio-message" role="alert">{error}</div>}
       {actionMessage && <div className="portfolio-message" role="status">{actionMessage}</div>}
       <section className="coin-table full-table">
         <div className="table-head"><span>Asset</span><span>Balance</span><span>Value</span><span>Allocation</span></div>
-        {portfolio.holdings.map((holding) => (
+        {holdings.map((holding) => (
           <div className="table-row" key={holding.id}>
             <div className="asset"><CoinIcon coin={holding} /><div><strong>{holding.name}</strong><small>{holding.symbol}</small></div></div>
             <strong>{visible ? `${holding.quantity.toFixed(holding.price < 10 ? 4 : 6)} ${holding.symbol}` : '••••'}</strong>
             <strong>{visible ? money(holding.value) : '••••'}</strong>
-            <span className="allocation"><i style={{ width: `${portfolio.totalUsd ? Math.max(2, holding.value / portfolio.totalUsd * 100) : 0}%` }} /></span>
+            <span className="allocation"><i style={{ width: `${totalUsd ? Math.max(2, holding.value / totalUsd * 100) : 0}%` }} /></span>
           </div>
         ))}
-        {portfolio.holdings.length === 0 && <div className="empty-state">No crypto holdings yet. Place a paper trade to get started.</div>}
+        {holdings.length === 0 && <div className="empty-state">No crypto holdings yet. Place a paper trade to get started.</div>}
       </section>
       <section className="orders-section">
         <div className="section-heading"><div><span className="section-kicker">PAPER TRADING</span><h2>Recent orders</h2></div></div>
@@ -520,7 +565,7 @@ function Portfolio() {
               <strong className={order.side === 'BUY' ? 'positive' : 'negative'}>{order.side}</strong>
               <strong>{order.symbol}</strong>
               <span>{order.quantity.toFixed(6)}</span>
-              <span>{money(order.totalUsd)}</span>
+              <span>{money(order.amountUsd)}</span>
             </div>
           ))}
           {portfolio.orders.length === 0 && <div className="empty-state">Your completed paper trades will appear here.</div>}
@@ -566,23 +611,39 @@ function Login() {
       setError('Enter a valid email address.');
       return;
     }
-    if (password.length < 8 || new TextEncoder().encode(password).length > 72) {
-      setError('Password must be at least 8 characters and no more than 72 bytes.');
+    if (password.length < 8 || password.length > 128) {
+      setError('Password must be between 8 and 128 characters.');
       return;
     }
 
     setSubmitting(true);
     try {
-      const result = await apiRequest<{ user: User }>(isSignup ? '/api/auth/register' : '/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...(isSignup ? { name: name.trim() } : {}),
+      const accounts = readStored<StoredAccount[]>('coinswift_local_accounts', []);
+      if (!Array.isArray(accounts)) throw new Error('Saved demo accounts are invalid. Clear this site’s browser data and try again.');
+      let account: StoredAccount | undefined;
+      if (isSignup) {
+        if (accounts.some((savedAccount) => savedAccount.email === normalizedEmail)) {
+          throw new Error('An account with this email already exists in this browser.');
+        }
+        const salt = newSalt();
+        account = {
+          id: crypto.randomUUID(),
+          name: name.trim(),
           email: normalizedEmail,
-          password,
-        }),
-      });
-      setUser(result.user);
-      setSuccess(isSignup ? 'Account created. Your paper wallet is ready.' : 'Login successful.');
+          salt,
+          passwordHash: await hashPassword(password, salt),
+        };
+        writeStored('coinswift_local_accounts', [...accounts, account]);
+      } else {
+        account = accounts.find((savedAccount) => savedAccount.email === normalizedEmail);
+        if (!account || (await hashPassword(password, account.salt)) !== account.passwordHash) {
+          throw new Error('Email or password is incorrect. Create an account in this browser first.');
+        }
+      }
+      const currentUser = { id: account.id, name: account.name, email: account.email };
+      saveLocalSession(currentUser);
+      setUser(currentUser);
+      setSuccess(isSignup ? 'Local demo account created. Your paper wallet is ready.' : 'Login successful.');
       navigate('/portfolio');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Unable to authenticate. Please try again.');
@@ -597,13 +658,13 @@ function Login() {
       <form className="auth-card" onSubmit={submit} noValidate>
         <span className="auth-icon"><CircleUserRound size={28} /></span>
         <h1>{isSignup ? 'Create your account' : 'Welcome back'}</h1>
-        <p>{isSignup ? 'Create an account to start paper trading.' : 'Log in to manage your paper portfolio.'}</p>
+        <p>{isSignup ? 'Create a local account to start paper trading.' : 'Log in to this browser’s paper-trading account.'}</p>
         {isSignup && <label>Full name<input type="text" autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" /></label>}
         <label>Email address<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
         <label>Password<div className="password-field"><input type={show ? 'text' : 'password'} autoComplete={isSignup ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} onClick={() => setShow(!show)}>{show ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label>
         {error && <div className="auth-message auth-error" role="alert">{error}</div>}
         {success && <div className="auth-message auth-success" role="status">{success}</div>}
-        {isSignup && <div className="demo-credentials">Your password is securely hashed before it is stored.</div>}
+        <div className="demo-credentials">Demo only: account data stays in this browser and is not server-secured or synced.</div>
         <button type="submit" className="place-order auth-submit" disabled={submitting}>{submitting ? 'Please wait...' : isSignup ? 'Create account' : 'Log in'}</button>
         <div className="auth-switch">{isSignup ? 'Already have an account?' : 'New to CoinSwift?' } <Link to={isSignup ? '/login' : '/signup'}>{isSignup ? 'Log in' : 'Create account'}</Link></div>
       </form>
