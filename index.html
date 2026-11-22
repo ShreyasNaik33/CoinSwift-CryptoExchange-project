@@ -183,6 +183,13 @@
       .portfolio-summary small { font-size: 13px; }
       .portfolio-actions { display: flex; gap: 10px; }
       .portfolio-actions button { height: 44px; border: 1px solid #2a3c52; border-radius: 8px; background: #17263a; color: white; display: flex; align-items: center; gap: 8px; padding: 0 16px; font-weight: 700; }
+      .portfolio-actions button:disabled, .place-order:disabled { opacity: .6; cursor: wait; }
+      .loading-message { border: 1px solid #1c2b40; border-radius: 10px; background: #0c1726; padding: 24px; color: #a6b5c8; }
+      .orders-section { margin-top: 40px; }
+      .orders-section .section-heading { margin-bottom: 16px; }
+      .orders-section .section-heading h2 { font-size: 24px; }
+      .order-table-head, .order-table-row { grid-template-columns: 1fr 1.2fr 1.5fr 1fr; }
+      .header-error { max-width: 1180px; margin: 0 auto; padding: 8px 24px; color: #ff9aa7; font-size: 12px; }
       .allocation { width: 120px; height: 6px; border-radius: 6px; background: #1e2d40; display: block; overflow: hidden; }
       .allocation i { height: 100%; display: block; border-radius: 6px; background: #4d8cff; }
       .auth-page { min-height: 100vh; display: grid; place-items: center; position: relative; background: radial-gradient(circle at 50% 30%,#14243a 0,#08111f 52%); }
